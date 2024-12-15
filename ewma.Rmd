@@ -1,0 +1,661 @@
+---
+title: "EWMA para Controle Estatístico de Qualidade"
+author: "Arquimedes Macedo"
+output:
+  html_document:
+    df_print: paged
+    theme: paper
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: true
+    code_folding: hide
+  pdf_document:
+    toc: true
+    latex_engine: lualatex
+    keep_tex: false
+    df_print: kable
+header-includes:
+  - \usepackage{fontspec}
+knit: (function(input, encoding) {
+    rmarkdown::render(
+      input,
+      encoding = encoding,
+      output_format = 'html_document',
+      output_dir = dirname(input),
+      output_file = 'index.html'
+    );
+    if (TRUE) {
+      rmarkdown::render(
+        input,
+        encoding = encoding,
+        output_format = 'pdf_document'
+      );
+    }
+  })
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+Sys.setenv(lang = "en_US")
+Sys.setlocale("LC_ALL", "en_US.UTF-8")
+knitr::opts_chunk$set(
+  echo = knitr::is_html_output(),
+  warning = FALSE,
+  message = FALSE,
+  out.extra = "keepaspectratio=true",
+  fig.align = "center"
+)
+
+get_output_format <- function() {
+  output <- rmarkdown:::parse_yaml_front_matter(readLines(knitr::current_input()))$output
+  if (is.list(output)) {
+    return(names(output)[1])
+  } else {
+    return(output[1])
+  }
+}
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(knitr)
+library(ggplot2)
+library(plotly)
+library(grid)
+library(gridExtra)
+```
+
+```{r}
+# Temas para os gráficos
+
+theme.base <- theme_minimal(base_size = 11) +
+  theme(
+    axis.text = element_text(size = 8),
+    plot.title = element_text(hjust = 0.5, size = 11, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 9),
+    plot.caption = element_text(size = 8),
+    axis.title = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    panel.grid.major = element_line(colour = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_line(
+      colour = adjustcolor("grey90", alpha.f = 0.4),
+      linewidth = 0.5
+    ),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    axis.line.x = element_line(colour = "grey"),
+    axis.line.y = element_line(colour = "grey"),
+  )
+
+
+plotly.base <- function(p) {
+  p %>%
+    layout(margin = list(b = 60, t = 80)) %>%
+    config(mathjax = 'cdn')
+}
+
+
+my.plotly <- function(p) {
+  if (knitr::is_latex_output()) return(p)
+  ggplotly(p) %>% plotly.base
+}
+```
+
+## Introdução
+
+Durante o curso de CEQ, vimos, predominantemente, cartas de controle de Shewhart. Este, no entanto, usa estatísticas apenas da última amostra e ignoram a informação de amostras anteriores, o que a torna pouco sensível para detectar mudanças pequenas, $\leq1.5\sigma$, no processo.
+
+Para contornar essa limitação, existem duas alternativas principais: CUSUM e EWMA. Neste texto, vamos abordar a segunda.
+
+
+## EWMA
+
+EWMA é a sigla para Exponential Weighted Moving Average, ou Média Móvel Exponencialmente Ponderada. A ideia é simples: ao invés de usar apenas a última amostra, vamos usar uma média ponderada de todas as amostras anteriores. A ponderação é exponencial, o que significa que amostras mais antigas têm menos peso que amostras mais recentes.
+
+Matematicamente, a média EWMA é dada por:
+
+$$
+z_i = \lambda x_i + (1-\lambda)z_{i-1}
+$$
+
+onde $z_t$ é a média EWMA no instante $t$, $x_t$ é a amostra no instante $t$ e $\lambda \in (0, 1]$ é o fator de suavização aplicado a partir da amostra $i=1$, sendo $z_0 = \mu_0$.
+
+Desta forma temos que, para o $\lambda$, quanto mais próximo de 1, mais peso é dado à amostra mais recente. Por outro lado, quanto mais próximo de 0, mais peso é dado às amostras antigas.
+
+Uma vez que o EWMA é uma média ponderada de todas as amostras anteriores, ele é pouco sensível à suposição de normalidade dos dados. Isso o torna ideal para monitorar observações individuais.
+
+
+### Limites de controle
+
+Se as observações $x_i$ são variáveis aleatórias independentes, com variância $\sigma^2$, então a variância da média EWMA é dada por:
+
+$$
+\sigma^2_{z_i} = \sigma^2 \left( \frac{\lambda}{2-\lambda} \right) \left[ 1 - \left( 1-\lambda \right)^{2i} \right]
+$$
+Desta forma, os limites de controle para o EWMA são dados por:
+
+$$
+LC = \mu_0 \pm L\sigma \sqrt{\frac{\lambda}{2-\lambda} \left[ 1 - \left( 1-\lambda \right)^{2i} \right]}
+$$
+
+onde $L$ é o fator de multiplicação dos limites de controle, $\mu_0$ é a média inicial, $\sigma$ é o desvio padrão, $\lambda$ é o fator de suavização e $i$ é o número da amostra.
+
+### Exemplo
+
+Vamos simular um processo com média $\mu = 100$ e desvio padrão $\sigma = 5$. Vamos monitorar o processo com um fator de suavização $\lambda = 0.2$.
+
+```{r}
+ewma <- function(x, lambda, mu, sigma, L) {
+  ewma <- numeric(length(x))
+  ewma[1] <- mu
+  LCS <- numeric(length(x))
+  LCI <- numeric(length(x))
+  
+  for (i in 1:length(x)) {
+    ewma[i] <- lambda * x[i] + (1 - lambda) * ifelse(i == 1, mu, ewma[i - 1])
+    amostra_sd <- sigma * sqrt((lambda / (2 - lambda)) * (1 - (1 - lambda) ^ (2 * i)))
+    LCS[i] <- mu + L * amostra_sd
+    LCI[i] <- mu - L * amostra_sd
+  }
+  
+  ewma <- data.frame(
+    observacao = 1:length(x),
+    medida = x,
+    ewma = round(ewma, 3),
+    LCS = round(LCS, 3),
+    LCI = round(LCI, 3),
+    fora_de_controle = ewma < LCI | ewma > LCS
+  )
+  
+  return(ewma)
+}
+```
+
+
+```{r}
+exemplo_medidas_media <- 10
+exemplo_medidas_sd <- 1
+exemplo_lambda <- 0.1
+exemplo_limite_de_controle <- 2.7
+exemplo_medidas <- c(
+  09.45, 07.99, 09.29, 11.66, 12.16, 10.18,
+  08.04, 11.46, 09.20, 10.34, 09.03, 11.47,
+  10.51, 09.40, 10.08, 09.37, 10.62, 10.31,
+  08.52, 10.84, 10.90, 09.33, 12.29, 11.50,
+  10.60, 11.08, 10.38, 11.62, 11.31, 10.52
+)
+
+ewma_exemplo <- ewma(exemplo_medidas, exemplo_lambda, exemplo_medidas_media, exemplo_medidas_sd, exemplo_limite_de_controle)
+ewma_exemplo
+```
+
+
+```{r}
+my.plotly(
+  ewma_exemplo %>%
+    ggplot() +
+    geom_line(aes(
+      x = observacao, y = ewma, color = "EWMA"
+    )) +
+    geom_line(aes(
+      x = observacao, y = LCS, color = "Limite Inferior"
+    ), linetype = "dashed") +
+    geom_line(aes(
+      x = observacao, y = LCI, color = "Limite Superior"
+    ), linetype = "dashed") +
+    geom_hline(
+      aes(yintercept = exemplo_medidas_media, color = "Média do processo"),
+      linetype = "dotted"
+    ) +
+    geom_point(aes(
+      x = observacao, y = medida, color = "Medida"
+    ), shape = 1) +
+    geom_point(
+      data = . %>% filter(fora_de_controle),
+      aes(x = observacao, y = ewma, color = "Fora de controle"),
+      size = 2,
+      shape = 4
+    ) +
+    labs(
+      x = "Amostra",
+      y = "EWMA",
+      title = "Monitoramento do processo com EWMA",
+      color = "Legenda"
+    ) +
+    scale_color_manual(
+      values = c(
+        "EWMA" = "blue",
+        "Limite Inferior" = adjustcolor("red", alpha.f = 0.5),
+        "Limite Superior" = adjustcolor("red", alpha.f = 0.5),
+        "Média do processo" = adjustcolor("black", alpha.f = 0.5),
+        "Medida" = adjustcolor("black", alpha.f = 0.6),
+        "Fora de controle" = adjustcolor("#f42f2f", alpha.f = 0.8)
+      )
+    ) +
+    theme.base
+)
+```
+
+
+### Sobre o $\lambda$
+
+O $\lambda$ é um parâmetro importante no EWMA. Ele controla a sensibilidade do gráfico. Quanto mais próximo de 1, mais sensível o gráfico será a mudanças no processo. Por outro lado, quanto mais próximo de 0, menos sensível o gráfico será. Além disso, quando $\lambda = 1$, teremos a carta de controle de Shewhart, pois a média EWMA será igual à média das amostras.
+
+```{r}
+ewma_exemplo2 <- bind_rows(
+  ewma_exemplo %>% select(observacao, ewma) %>% mutate(lambda = as.factor(exemplo_lambda)),
+  ewma(
+    exemplo_medidas,
+    0.01,
+    exemplo_medidas_media,
+    exemplo_medidas_sd,
+    exemplo_limite_de_controle
+  ) %>% select(observacao, ewma) %>% mutate(lambda = as.factor(0.01)),
+  ewma(
+    exemplo_medidas,
+    0.5,
+    exemplo_medidas_media,
+    exemplo_medidas_sd,
+    exemplo_limite_de_controle
+  ) %>% select(observacao, ewma) %>% mutate(lambda = as.factor(0.5))
+)
+
+my.plotly(
+  ewma_exemplo2 %>%
+    ggplot() +
+    geom_line(aes(
+      x = observacao,
+      y = ewma,
+      color = "EWMA",
+      linetype = lambda
+    )) +
+    geom_line(
+      data = ewma_exemplo,
+      aes(x = observacao, y = LCS, color = "Limite Inferior"),
+      linetype = "dashed"
+    ) +
+    geom_line(
+      data = ewma_exemplo,
+      aes(x = observacao, y = LCI, color = "Limite Superior"),
+      linetype = "dashed"
+    ) +
+    geom_point(
+      data = ewma_exemplo,
+      aes(x = observacao, y = medida, color = "Medida"),
+      shape = 1
+    ) +
+    labs(
+      x = "Amostra",
+      y = "EWMA",
+      title = "EWMA para diferentes valores de λ",
+      color = "Legenda"
+    ) +
+    scale_color_manual(
+      values = c(
+        "EWMA" = "blue",
+        "Limite Inferior" = adjustcolor("red", alpha.f = 0.5),
+        "Limite Superior" = adjustcolor("red", alpha.f = 0.5),
+        "Medida" = adjustcolor("black", alpha.f = 0.6)
+      )
+    ) +
+    theme.base
+)
+```
+
+
+Para Montgomery, em geral, valores de $\lambda$ entre 0.05 e 0.25 são recomendados. Valores menores que 0.05 são muito insensíveis a mudanças no processo, enquanto valores maiores que 0.25 são muito sensíveis a variações normais do processo.
+
+```{r}
+lambdas <- expand.grid(lambda = c(0.1, 0.2, 0.3, 0.5, 0.6), amostra = c(0:10)) %>%
+  mutate(
+    peso = round(lambda * (1 - lambda) ^ amostra, 4),
+    lambda = as.factor(lambda)
+  )
+
+my.plotly(
+  lambdas %>%
+    ggplot(aes(
+      x = amostra, y = peso, color = lambda
+    )) +
+    geom_line() +
+    labs(
+      x = "Idade da amostra",
+      y = "Peso",
+      title = "Peso das amostras em função do fator de suavização",
+      color = "Valor de λ"
+    ) +
+    theme.base
+)
+```
+
+
+### Para atributos
+
+O EWMA também pode ser usado para monitorar proporções. Neste caso, a estatística EWMA permanece a mesma:
+
+$$
+z_i = \lambda x_i + (1-\lambda)z_{i-1}
+$$
+
+onde, agora, $x_i \sim Poi(l)$ é a contagem na amostra $i$, com $z_0 = \mu_0$ a taxa em controle.
+
+Já o limite de controle é dado por:
+
+$$
+\begin{aligned}
+  \text{LCS} &= \mu_0 + A_S \sqrt{\frac{\lambda\mu_0}{2-\lambda} \left[ 1 - \left( 1-\lambda \right)^{2i} \right]} \\
+  \text{LCI} &= \mu_0 - A_I \sqrt{\frac{\lambda\mu_0}{2-\lambda} \left[ 1 - \left( 1-\lambda \right)^{2i} \right]}
+\end{aligned}
+$$
+
+onde $A_S$ e $A_I$ são os fatores de multiplicação para o limite superior e inferior, respectivamente. Muitas vezes, $A_S = A_I = A$.
+
+```{r}
+ewma_atributos <- function(x, lambda, mu, A) {
+  ewma <- numeric(length(x) + 1)
+  ewma[1] <- mu
+  LCS <- numeric(length(x))
+  LCI <- numeric(length(x))
+  
+  for (i in 1:length(x)) {
+    ewma[i + 1] <- lambda * x[i] + (1 - lambda) * ewma[i]
+    amostra_sd <- A * sqrt((lambda * mu) / (2 - lambda) * (1 - (1 - lambda) ^ (2 * i)))
+    LCS[i] <- mu + amostra_sd
+    LCI[i] <- mu - amostra_sd
+  }
+  
+  ewma <- data.frame(
+    observacao = 1:length(x),
+    medida = x,
+    ewma = round(ewma[-1], 3),
+    LCS = round(LCS, 3),
+    LCI = round(LCI, 3),
+    fora_de_controle = ewma[-1] < LCI | ewma[-1] > LCS
+  )
+  
+  return(ewma)
+}
+```
+
+```{r}
+set.seed(4)
+exemplo_medidas_mu <- 0.1
+exemplo_medidas_atributos <- unlist(replicate(30, rbinom(1, 1, 0.1), simplify = FALSE))
+exemplo_lambda_atributos <- 0.1
+exemplo_limite_de_controle_atributos <- 2.7
+
+ewma_atributos_exemplo <- ewma_atributos(
+  exemplo_medidas_atributos,
+  exemplo_lambda_atributos,
+  exemplo_medidas_mu,
+  exemplo_limite_de_controle_atributos
+)
+```
+
+```{r}
+my.plotly(
+  ewma_atributos_exemplo %>%
+    ggplot() +
+    geom_line(aes(
+      x = observacao, y = ewma, color = "EWMA"
+    )) +
+    geom_line(aes(
+      x = observacao, y = LCS, color = "Limite Inferior"
+    ), linetype = "dashed") +
+    geom_line(aes(
+      x = observacao, y = LCI, color = "Limite Superior"
+    ), linetype = "dashed") +
+    geom_hline(
+      aes(yintercept = exemplo_medidas_mu, color = "Média do processo"),
+      linetype = "dotted"
+    ) +
+    geom_point(aes(
+      x = observacao, y = medida, color = "Medida"
+    ), shape = 1) +
+    geom_point(
+      data = . %>% filter(fora_de_controle),
+      aes(x = observacao, y = ewma, color = "Fora de controle"),
+      size = 2,
+      shape = 4
+    ) +
+    labs(
+      x = "Amostra",
+      y = "EWMA",
+      title = "Monitoramento do processo com EWMA para atributos",
+      color = "Legenda"
+    ) +
+    scale_color_manual(
+      values = c(
+        "EWMA" = "blue",
+        "Limite Inferior" = adjustcolor("red", alpha.f = 0.5),
+        "Limite Superior" = adjustcolor("red", alpha.f = 0.5),
+        "Média do processo" = adjustcolor("black", alpha.f = 0.5),
+        "Medida" = adjustcolor("black", alpha.f = 0.6),
+        "Fora de controle" = adjustcolor("#f42f2f", alpha.f = 0.8)
+      )
+    ) +
+    theme.base
+)
+```
+
+
+### Como preditor
+
+Além de monitorar processos, o EWMA também pode ser usado para prever valores futuros. Desta forma, pode ser usada como base de um processo de controle dinâmico.
+
+Ou seja, a média EWMA pode ser usada como preditor para o próximo valor do processo, sinalizando quando o processo irá sair de controle. Além disso, a diferença entre o valor observado e o valor objetivo pode ser usada para determinar o quanto deve ser ajustado.
+
+Assim, o valor predito é dado por:
+
+$$
+\hat{z}_{i} = z_{i-1} + \lambda_1 e_i + \lambda_2 \sum_{j=1}^{i} e_j + \lambda_3 \nabla e_i
+$$
+
+onde, $e_i = x_i - z_{i-1}$ é o erro na previsão, $\nabla e_i = e_i - e_{i-1}$ é a primeira diferença entre os erros e $\lambda_1$, $\lambda_2$ e $\lambda_3$ são os fatores de ponderação escolhidos tais que resultam no melhor desempenho do preditor.
+
+```{r}
+exemplo_medidas_media <- 10
+exemplo_medidas_sd <- 1
+exemplo_lambda <- 0.1
+exemplo_limite_de_controle <- 2.7
+lambda1 <- 0.04 # peso do erro de previsão (proporcional)
+lambda2 <- 0.01 # peso da soma cumulativa dos erros (integral)
+lambda3 <- 0.10 # peso da diferença de erros (diferencial)
+
+medidas_valores <- exemplo_medidas[1:(length(exemplo_medidas) - 2)]
+
+ewma_valores <- ewma(medidas_valores, exemplo_lambda, exemplo_medidas_media, exemplo_medidas_sd, exemplo_limite_de_controle)
+
+# prever o próximo valor
+predicoes <- numeric(length(medidas_valores))
+predicoes[1] <- exemplo_medidas_media
+predicoes[2] <- ewma_valores$ewma[2]
+erro_previsao <- 0
+diff_erros <- 0
+soma_erros <- 0
+for (i in 3:length(medidas_valores)) {
+  erro_previsao <- medidas_valores[i] - predicoes[i - 1]  # Calcula o erro atual
+  diff_erros <- erro_previsao - (medidas_valores[i - 1] - predicoes[i - 2])  # Diferença de erros
+  soma_erros <- soma_erros + erro_previsao  # Atualiza a soma cumulativa dos erros
+  
+  predicoes[i] <- predicoes[i - 1] + 
+                  lambda1 * erro_previsao + 
+                  lambda2 * soma_erros + 
+                  lambda3 * diff_erros  # Calcula a previsão
+}
+
+predicoes_ <- c(NA, predicoes)
+
+ewma_preditor <- bind_rows(
+  ewma_valores,
+  data.frame(
+    observacao = ewma_valores$observacao[length(ewma_valores$observacao)] + 1,
+    medida = NA,
+    ewma = NA,
+    LCS = ewma_valores$LCS[length(ewma_valores$LCS)],
+    LCI = ewma_valores$LCI[length(ewma_valores$LCI)],
+    fora_de_controle = NA
+  )
+)
+
+ewma_preditor$predicao <- predicoes_
+ewma_preditor$fora_de_controle_predicao <- (
+  ewma_preditor$predicao < ewma_preditor$LCI | ewma_preditor$predicao > ewma_preditor$LCS
+)
+```
+
+
+```{r}
+my.plotly(
+  ewma_preditor %>%
+    ggplot() +
+    geom_line(aes(
+      x = observacao, y = ewma, color = "EWMA"
+    )) +
+    geom_line(aes(
+      x = observacao, y = predicao, color = "Predição"
+    ), linetype = "dotted") +
+    geom_line(aes(
+      x = observacao, y = LCS, color = "Limite Inferior"
+    ), linetype = "dashed") +
+    geom_line(aes(
+      x = observacao, y = LCI, color = "Limite Superior"
+    ), linetype = "dashed") +
+    geom_hline(
+      aes(yintercept = exemplo_medidas_media, color = "Média do processo"),
+      linetype = "dotted"
+    ) +
+    geom_point(aes(
+      x = observacao, y = medida, color = "Medida"
+    ), shape = 1) +
+    geom_point(
+      data = . %>% filter(fora_de_controle),
+      aes(x = observacao, y = ewma, color = "Fora de controle"),
+      size = 2,
+      shape = 4
+    ) +
+    geom_point(
+      data = . %>% filter(fora_de_controle_predicao),
+      aes(x = observacao, y = predicao, color = "Fora de controle (predição)"),
+      size = 2,
+      shape = 4
+    ) +
+    labs(
+      x = "Amostra",
+      y = "EWMA",
+      title = "Monitoramento do processo com EWMA e predição",
+      color = "Legenda"
+    ) +
+    scale_color_manual(
+      values = c(
+        "EWMA" = "blue",
+        "Predição" = "darkgreen",
+        "Limite Inferior" = adjustcolor("red", alpha.f = 0.5),
+        "Limite Superior" = adjustcolor("red", alpha.f = 0.5),
+        "Média do processo" = adjustcolor("black", alpha.f = 0.5),
+        "Medida" = adjustcolor("black", alpha.f = 0.6),
+        "Fora de controle" = adjustcolor("#f42f2f", alpha.f = 0.8),
+        "Fora de controle (predição)" = adjustcolor("#f42f2f", alpha.f = 0.8)
+      )
+    ) +
+    theme.base
+)
+```
+
+### EWMA vs CUSUM
+
+De uma forma geral, o CUSUM possui mais poder que o EWMA para detectar mudanças pequenas no processo. No entanto, o EWMA é mais simples de implementar e interpretar.
+
+No gráfico a seguir é mostrado o resultado da otimização por Monte Carlo dos parâmetros CUSUM e EWMA. Nota-se que o CUSUM é mais sensível às mudanças no processo.
+
+```{r}
+comparacao_ewma_cusum <- readRDS("estatisticas-combinadas-resumo.rds")
+
+pp_ <- my.plotly(
+  comparacao_ewma_cusum %>%
+    ggplot() +
+    geom_line(aes(
+      x = h1_phi,
+      y = mean,
+      color = parametro,
+      linetype = algoritmo
+    )) +
+    geom_point(aes(
+      x = h1_phi,
+      y = mean,
+      color = parametro,
+      shape = algoritmo
+    )) +
+    geom_vline(
+      xintercept = 0.2,
+      linetype = "dotted",
+      color = "gray70"
+    ) +
+    labs(
+      x = "Valores de Φ₁",
+      y = "Fração de pontos fora de controle",
+      linetype = "Algoritmo",
+      title = "Fração de pontos fora de controle",
+      color = "Valores dos parâmetros",
+      shape = "Algoritmo"
+    ) +
+    theme.base
+)
+  
+if (!knitr::is_latex_output()) {
+  pp_ %>% layout(annotations = list(
+    x = 0.2,
+    y = 0.2,
+    text = "Processo sob controle",
+    textangle = -90
+  ))
+} else {
+  pp_
+}
+```
+
+
+Apesar disso, o ewma possui uma variabilidade menor que o CUSUM.
+
+
+```{r, warning=FALSE}
+comparacao_ewma_cusum <- readRDS("estatisticas-combinadas.rds")
+
+pp_ <- my.plotly(
+  comparacao_ewma_cusum %>%
+    ggplot() +
+    geom_boxplot(
+      aes(
+        x = h1_phi,
+        y = fracao_fora_de_controle,
+        fill = parametro,
+        shape = algoritmo
+      ),
+    ) +
+    labs(
+      x = "Valores de Φ₁",
+      y = "Fração de pontos fora de controle",
+      fill = "Valores dos parâmetros",
+      linetype = "Algoritmo",
+      title = "Fração de pontos fora de controle",
+      color = "Valores dos parâmetros"
+    ) +
+    facet_wrap(~ algoritmo) +
+    theme.base
+)
+if (!knitr::is_latex_output()) {
+  pp_ %>% layout(boxmode = 'group')
+} else {
+  pp_
+}
+```
+
+
+
+## Referências
+
+- Montgomery, D. C. Introduction to Statistical Quality Control. 2013. John Wiley & Sons.
